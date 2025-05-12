@@ -27,61 +27,36 @@ app.post('/verify', async (req, res) => {
         const integrityData = await verifyTokenWithGoogle(token);
 
         // Step 2: Validate nonce
-        if (integrityData.requestDetails?.nonce !== nonce) {
-            return res.json({ 
-                valid: false, 
-                reason: "Nonce mismatch", 
-                details: null 
-            });
+        if (integrityData.requestDetails.nonce !== nonce) {
+            return res.json({ valid: false, reason: "Nonce mismatch" });
         }
 
         // Step 3: App integrity check
-        const appVerdict = integrityData.appIntegrity?.appRecognitionVerdict;
-        if (appVerdict !== "PLAY_RECOGNIZED") {
-            return res.json({ 
-                valid: false, 
-                reason: "App not recognized by Play Store",
-                details: {
-                    appRecognitionVerdict: appVerdict
-                }
-            });
+        if (integrityData.appIntegrity?.appRecognitionVerdict !== "PLAY_RECOGNIZED") {
+            return res.json({ valid: false, reason: "App not recognized by Play Store" });
         }
 
         // Step 4: Device integrity check
         const verdicts = integrityData.deviceIntegrity?.deviceRecognitionVerdict || [];
-
-        const details = {
-            appRecognitionVerdict: appVerdict,
-            deviceRecognitionVerdict: verdicts,
-            meetsBasicIntegrity: verdicts.includes("MEETS_BASIC_INTEGRITY"),
-            meetsDeviceIntegrity: verdicts.includes("MEETS_DEVICE_INTEGRITY"),
-            meetsStrongIntegrity: verdicts.includes("MEETS_STRONG_INTEGRITY"),
-            isEmulator: verdicts.includes("MEETS_VIRTUAL_INTEGRITY"),
-            isRooted: verdicts.includes("UNKNOWN") || verdicts.includes("FAILED") || verdicts.includes("UNKNOWN_OR_ROOTED"),
-            isCompromised: !verdicts.includes("MEETS_DEVICE_INTEGRITY")
-        };
-
-        // Final validity based on device integrity
-        const valid = verdicts.includes("MEETS_DEVICE_INTEGRITY");
+        const isCompromised = !verdicts.includes("MEETS_DEVICE_INTEGRITY");
 
         res.json({ 
-            valid,
-            reason: valid ? "All checks passed" : "Device integrity failed",
-            details
+            valid: !isCompromised,
+            details: {
+                isEmulator: verdicts.includes("MEETS_VIRTUAL_INTEGRITY"),
+                isRooted: isCompromised
+            }
         });
     } catch (error) {
         console.error("Verification error:", error.response?.data || error.message || error);
-        res.status(500).json({ 
-            error: "Integrity check failed",
-            details: null
-        });
+        res.status(500).json({ error: "Integrity check failed" });
     }
 });
 
 async function verifyTokenWithGoogle(token) {
-    const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS); // From Render env
+    const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS); // ✅ This reads from Render's environment
     const auth = new GoogleAuth({
-        credentials,
+        credentials: credentials,
         scopes: 'https://www.googleapis.com/auth/playintegrity'
     });
 
@@ -89,16 +64,20 @@ async function verifyTokenWithGoogle(token) {
     const accessToken = (await client.getAccessToken()).token;
     console.log("Access Token:", accessToken);
 
-    const response = await axios.post(
-        `https://playintegrity.googleapis.com/v1/${PACKAGE_NAME}:decodeIntegrityToken`,
-        { integrity_token: token },
-        { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-
-    console.log("Google Response:", response.data);
-    return response.data.tokenPayloadExternal;
+    try {
+        const response = await axios.post(
+            `https://playintegrity.googleapis.com/v1/${PACKAGE_NAME}:decodeIntegrityToken`,
+            { integrity_token: token },
+            { headers: { Authorization: `Bearer ${accessToken}` } }
+        );
+        console.log("Google Response:", response.data);
+        return response.data.tokenPayloadExternal;
+    } catch (err) {
+        console.error("Google API error:", err.response?.data || err.message || err);
+        throw err;
+    }
 }
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
