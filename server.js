@@ -1,6 +1,5 @@
 const express = require('express');
 const { GoogleAuth } = require('google-auth-library');
-const jwtDecode = require('jwt-decode');
 const axios = require('axios');
 const cors = require('cors');
 
@@ -23,30 +22,64 @@ app.post('/verify', async (req, res) => {
             return res.status(400).json({ error: "Invalid nonce" });
         }
 
-        // Step 1: Call Google API to decode the token
         const integrityData = await verifyTokenWithGoogle(token);
 
-        // Step 2: Validate nonce
+        // Step 1: Validate nonce
         if (integrityData.requestDetails.nonce !== nonce) {
             return res.json({ valid: false, reason: "Nonce mismatch" });
         }
 
-        // Step 3: App integrity check
-        if (integrityData.appIntegrity?.appRecognitionVerdict !== "PLAY_RECOGNIZED") {
-            return res.json({ valid: false, reason: "App not recognized by Play Store" });
+        // Step 2: Handle App Integrity
+        const appVerdict = integrityData.appIntegrity?.appRecognitionVerdict;
+
+        switch (appVerdict) {
+            case "PLAY_RECOGNIZED":
+                // Trusted app from Play Store
+                break;
+            case "UNRECOGNIZED_VERSION":
+                return res.json({
+                    valid: false,
+                    reason: "Unrecognized version - possibly sideloaded or debug build"
+                });
+            case "UNEVALUATED":
+                return res.json({
+                    valid: false,
+                    reason: "App integrity not evaluated"
+                });
+            case "FAILED":
+            default:
+                return res.json({
+                    valid: false,
+                    reason: "App integrity failed"
+                });
         }
 
-        // Step 4: Device integrity check
+        // Step 3: Handle Device Integrity
         const verdicts = integrityData.deviceIntegrity?.deviceRecognitionVerdict || [];
-        const isCompromised = !verdicts.includes("MEETS_DEVICE_INTEGRITY");
 
-        res.json({ 
+        const hasStrong = verdicts.includes("MEETS_STRONG_INTEGRITY");
+        const hasDevice = verdicts.includes("MEETS_DEVICE_INTEGRITY");
+        const hasBasic = verdicts.includes("MEETS_BASIC_INTEGRITY");
+        const isVirtual = verdicts.includes("MEETS_VIRTUAL_INTEGRITY");
+
+        let integrityLevel = "UNKNOWN";
+        if (hasStrong) integrityLevel = "STRONG";
+        else if (hasDevice) integrityLevel = "DEVICE";
+        else if (hasBasic) integrityLevel = "BASIC";
+
+        const isCompromised = !(hasBasic || hasDevice || hasStrong);
+
+        res.json({
             valid: !isCompromised,
+            integrityLevel,
             details: {
-                isEmulator: verdicts.includes("MEETS_VIRTUAL_INTEGRITY"),
-                isRooted: isCompromised
+                appRecognitionVerdict: appVerdict,
+                deviceRecognitionVerdict: verdicts,
+                isEmulator: isVirtual,
+                isRootedOrTampered: isCompromised
             }
         });
+
     } catch (error) {
         console.error("Verification error:", error.response?.data || error.message || error);
         res.status(500).json({ error: "Integrity check failed" });
@@ -54,7 +87,7 @@ app.post('/verify', async (req, res) => {
 });
 
 async function verifyTokenWithGoogle(token) {
-    const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS); // ✅ This reads from Render's environment
+    const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
     const auth = new GoogleAuth({
         credentials: credentials,
         scopes: 'https://www.googleapis.com/auth/playintegrity'
@@ -62,22 +95,16 @@ async function verifyTokenWithGoogle(token) {
 
     const client = await auth.getClient();
     const accessToken = (await client.getAccessToken()).token;
-    console.log("Access Token:", accessToken);
 
-    try {
-        const response = await axios.post(
-            `https://playintegrity.googleapis.com/v1/${PACKAGE_NAME}:decodeIntegrityToken`,
-            { integrity_token: token },
-            { headers: { Authorization: `Bearer ${accessToken}` } }
-        );
-        console.log("Google Response:", response.data);
-        return response.data.tokenPayloadExternal;
-    } catch (err) {
-        console.error("Google API error:", err.response?.data || err.message || err);
-        throw err;
-    }
+    const response = await axios.post(
+        `https://playintegrity.googleapis.com/v1/${PACKAGE_NAME}:decodeIntegrityToken`,
+        { integrity_token: token },
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+
+    return response.data.tokenPayloadExternal;
 }
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
+    console.log(`Server running on port ${PORT}`);
 });
